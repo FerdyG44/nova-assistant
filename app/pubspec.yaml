@@ -1,0 +1,19 @@
+name: nova_app
+description: NOVA mobil istemcisi
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  record: ^6.0.0
+  audioplayers: ^6.1.0
+  path_provider: ^2.1.4
+  shared_preferences: ^2.3.2
+
+flutter:
+  uses-material-design: true

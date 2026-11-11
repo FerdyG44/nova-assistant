@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>NOVA</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #020409; cursor: none;
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #top { position: fixed; top: 4vh; width: 100%; text-align: center; color: #3fe0ff;
+    letter-spacing: .9em; font-size: 1.1vw; opacity: .85; text-shadow: 0 0 12px #3fe0ff; }
+  #state { display: block; letter-spacing: .25em; font-size: .8vw; margin-top: .8vh; opacity: .6; }
+  #heard { position: fixed; top: 11vh; width: 70%; left: 15%; text-align: center; color: #8aa3b5;
+    font-size: 1.3vw; font-style: italic; min-height: 2em; transition: opacity .4s; }
+  #sub { position: fixed; bottom: 7vh; width: 70%; left: 15%; text-align: center; color: #d9f8ff;
+    font-size: 1.7vw; line-height: 1.45; text-shadow: 0 0 18px rgba(63,224,255,.55); min-height: 3em; }
+  body.closing div { transition: opacity .4s; opacity: 0; }
+  body.closing canvas { transition: opacity .25s .35s; opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="top">NOVA<span id="state">bekliyor</span></div>
+<div id="heard"></div>
+<div id="sub"></div>
+<script>
+(() => {
+  // ------------------------------------------------------------------ ayarlar
+  const G = 120;                        // ekran ızgarası: G x G piksel
+  const CYAN = [63, 224, 255], WHITE = [235, 252, 255];
+  const params = new URLSearchParams(location.search);
+  const TOKEN = params.get('t') || '';
+  const DEMO = params.has('demo');
+  const LABELS = { idle: 'bekliyor', listening: 'dinliyorum', thinking: 'düşünüyorum', speaking: 'konuşuyor' };
+
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+  const off = document.createElement('canvas'); off.width = off.height = G;
+  const octx = off.getContext('2d'), img = octx.createImageData(G, G);
+  const $state = document.getElementById('state'), $sub = document.getElementById('sub'),
+        $heard = document.getElementById('heard');
+
+  // ------------------------------------------------------------------ durum
+  const S = {
+    state: 'idle', power: 0, powerTarget: .55,
+    amp: 0, width: .5,                   // ağız açıklığı ve genişliği (0..1)
+    blink: 1, nextBlink: 2,
+    look: { x: 0, y: 0 }, lookTarget: { x: 0, y: 0 }, nextLook: 1,
+    t: 0, fake: null,                    // ses yoksa metinden sahte dudak hareketi
+    emotion: 'neutral', emoUntil: 0,     // konuşurken takınılan ifade ve ne zamana kadar süreceği
+    emph: 0, avg: 0,                     // konuşmadaki vurgu (kaşlar ve baş buna tepki verir)
+    sac: { x: 0, y: 0 }, nextSac: .3,    // gözün küçük, hızlı oynamaları
+    reveal: 0, closing: false,           // açılış: pikseller dört yandan gelip yüzü oluşturur; kapanışta dağılır
+    spec: new Float32Array(24),          // konuşurken başın çevresindeki ses halesi
+  };
+
+  // ------------------------------------------------------------------ ifadeler
+  // Her ifade bir parametre kümesidir; yüz her karede hedefe doğru yumuşakça kayar.
+  //   browL/browR: kaş kaldırma · browTilt: + üzgün (iç uçlar yukarı), - odaklı (iç uçlar aşağı)
+  //   eye: göz açıklığı · cheek: gülerken alt kapağın yükselmesi · smile: dudak köşeleri (+ yukarı, - aşağı)
+  //   open: ağzın kendiliğinden açıklığı · tilt/nod: başın yana ve öne eğimi · pupil: iris boyutu · r,g,b: renk
+  const BASE = { browL: 0, browR: 0, browTilt: 0, eye: 1, cheek: 0, smile: .25, open: 0, tilt: 0, nod: 0,
+                 pupil: 1, wink: 0, r: 63, g: 224, b: 255 };
+  const EMO = {
+    neutral:   {},
+    happy:     { smile: 1, eye: .92, cheek: .6, browL: .3, browR: .3, tilt: .05, r: 70, g: 238, b: 222 },
+    excited:   { smile: 1, eye: 1.15, cheek: .3, browL: .85, browR: .85, open: .1, nod: -.03, pupil: 1.15,
+                 r: 95, g: 242, b: 232 },
+    sad:       { smile: -.85, eye: .8, browTilt: .9, browL: -.1, browR: -.1, nod: .07, pupil: .95,
+                 r: 70, g: 160, b: 255 },
+    surprised: { smile: -.15, eye: 1.4, browL: 1, browR: 1, open: .5, nod: -.04, pupil: .8, r: 150, g: 236, b: 255 },
+    curious:   { smile: .2, eye: 1.08, browL: 1, browR: -.25, tilt: .11, pupil: 1.1 },
+    wink:      { smile: .95, cheek: .35, browL: .45, browR: -.1, tilt: -.07, wink: 1 },
+    listening: { smile: .3, eye: 1.1, browL: .3, browR: .3, tilt: .05, pupil: 1.1 },
+    thinking:  { smile: -.05, eye: .92, browTilt: -.45, browL: .55, browR: -.15, tilt: -.06, nod: -.03,
+                 r: 125, g: 180, b: 255 },
+    idle:      { smile: .15, eye: .9 },
+  };
+  const E = { ...BASE };
+  const FORCE = params.get('emo');             // ?demo&emo=happy : bir ifadeyi sabitleyip incelemek için
+
+  function mood() {
+    if (FORCE && EMO[FORCE]) return FORCE;
+    if (S.state === 'speaking' || performance.now() < S.emoUntil) return S.emotion;
+    return EMO[S.state] ? S.state : 'neutral';
+  }
+
+  function updateExpression(dt) {
+    const T = { ...BASE, ...EMO[mood()] }, a = 1 - Math.exp(-dt * 7);
+    for (const k in BASE) E[k] += (T[k] - E[k]) * a;
+    // açılış (toplanma) ve kapanış (dağılma) ilerlemesi
+    S.reveal = Math.max(0, Math.min(1, S.reveal + (S.closing ? -dt / .5 : dt / 1.9)));
+  }
+
+  function setState(s) {
+    if (s !== S.state && S.blinkT === undefined) S.blinkT = 0;   // durum değişirken göz kırp
+    S.state = s;
+    $state.textContent = LABELS[s] || s;
+    S.powerTarget = s === 'idle' ? .55 : 1;
+    if (s === 'listening') { $sub.textContent = ''; }
+  }
+
+  // ------------------------------------------------------------------ ses + dudak senkronu
+  let actx = null, analyser = null, timeBuf = null, freqBuf = null;
+  const audio = new Audio();
+  function ensureAudio() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = actx.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = .5;
+    actx.createMediaElementSource(audio).connect(analyser);
+    analyser.connect(actx.destination);
+    timeBuf = new Float32Array(analyser.fftSize);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+  }
+  document.addEventListener('click', () => actx && actx.resume());
+
+  function ended() {
+    S.fake = null;
+    S.emoUntil = performance.now() + 1500;   // ifade, söz bittikten sonra kısa bir süre daha yüzde kalır
+    if (!S.more) setState('listening');      // arkasından cümle gelecekse konuşma yüzünde kal
+    if (DEMO) window.__demoEnded && window.__demoEnded();
+    else fetch(`/face/ended?t=${TOKEN}`, { method: 'POST' }).catch(() => {});
+  }
+  audio.addEventListener('ended', ended);
+  audio.addEventListener('error', ended);
+
+  async function speak(name, text) {
+    setState('speaking');
+    typeText(text, Math.max(1200, text.length * 65));
+    if (!name) { fakeSpeech(text); return; }
+    ensureAudio();
+    try {
+      await actx.resume();
+      audio.src = `/audio/${name}?t=${TOKEN}`;
+      await audio.play();
+      if (isFinite(audio.duration)) typeText(text, audio.duration * 1000);
+    } catch (e) { fakeSpeech(text); }
+  }
+
+  // Ses dosyası yoksa ya da çalınamadıysa: hecelere göre ağız aç-kapa
+  function fakeSpeech(text) {
+    const dur = Math.max(1200, text.length * 65);
+    S.fake = { start: performance.now(), dur, seed: Math.random() * 10 };
+  }
+
+  let typeTimer = null;
+  function typeText(text, durMs) {
+    clearInterval(typeTimer);
+    const step = Math.max(12, (durMs || text.length * 55) / Math.max(1, text.length));
+    let i = 0; $sub.textContent = '';
+    typeTimer = setInterval(() => { $sub.textContent = text.slice(0, ++i); if (i >= text.length) clearInterval(typeTimer); }, step);
+  }
+
+  function updateMouth(dt) {
+    let target = 0, widthT = .5;
+    if (S.state === 'speaking' && analyser && !audio.paused) {
+      analyser.getFloatTimeDomainData(timeBuf);
+      let sum = 0; for (let i = 0; i < timeBuf.length; i++) sum += timeBuf[i] * timeBuf[i];
+      const rms = Math.sqrt(sum / timeBuf.length);
+      target = Math.min(1, Math.max(0, (rms - .012) * 9));
+      // ünlü şekli: tiz enerji fazlaysa (i, e) ağız geniş, pes ağırlıklıysa (o, u) yuvarlak
+      analyser.getByteFrequencyData(freqBuf);
+      const hz = actx.sampleRate / analyser.fftSize, band = (a, b) => {
+        let s = 0; for (let i = Math.floor(a / hz); i < Math.floor(b / hz); i++) s += freqBuf[i]; return s; };
+      const lo = band(250, 1000), hi = band(1800, 4500);
+      widthT = (lo + hi) > 0 ? Math.min(1, hi / (lo + hi) * 1.8) : .5;
+    } else if (S.fake) {
+      const e = performance.now() - S.fake.start;
+      if (e > S.fake.dur) { ended(); }
+      else {
+        const k = e / 1000 * 2 * Math.PI;
+        target = Math.max(0, .55 * Math.sin(k * 3.1 + S.fake.seed) + .35 * Math.sin(k * 5.3) + .15);
+        widthT = .5 + .4 * Math.sin(k * 1.7 + S.fake.seed);
+      }
+    }
+    // hızlı açıl, yumuşak kapan
+    const a = target > S.amp ? .55 : .22;
+    S.amp += (target - S.amp) * a;
+    S.width += (widthT - S.width) * .15;
+    // vurgu: ses ortalamanın üstüne çıktığında kaşlar kalkar, baş hafifçe oynar
+    S.avg += (S.amp - S.avg) * .04;
+    S.emph += (Math.max(0, Math.min(1, (S.amp - S.avg) * 3)) - S.emph) * .25;
+    // hale: sesin frekans dağılımı (ses yoksa ağız hareketinden türetilir)
+    const live = S.state === 'speaking' && analyser && !audio.paused;
+    for (let b = 0; b < 24; b++) {
+      let lv = 0;
+      if (live) {
+        const i0 = 2 + Math.floor(b ** 1.6), i1 = 3 + Math.floor((b + 1) ** 1.6);
+        for (let i = i0; i < i1; i++) lv += freqBuf[i];
+        lv = Math.min(1, lv / (i1 - i0) / 170);
+      } else if (S.state === 'speaking') {
+        lv = S.amp * (.55 + .45 * Math.sin(S.t * 9 + b * 1.7));
+      }
+      S.spec[b] += (lv - S.spec[b]) * (lv > S.spec[b] ? .5 : .12);
+    }
+  }
+
+  // ------------------------------------------------------------------ göz kırpma + bakış
+  function updateEyes(dt) {
+    S.nextBlink -= dt;
+    if (S.nextBlink <= 0) {                      // ara sıra peş peşe iki kez kırpar
+      S.blinkT = 0; S.nextBlink = Math.random() < .18 ? .28 : 2.2 + Math.random() * 4;
+    }
+    if (S.blinkT !== undefined) {
+      S.blinkT += dt;
+      const p = S.blinkT / .16;
+      S.blink = p < 1 ? Math.abs(1 - 2 * p) : 1;
+      if (p >= 1) S.blinkT = undefined;
+    }
+    S.nextLook -= dt;
+    if (S.nextLook <= 0) {
+      if (S.state === 'thinking') S.lookTarget = { x: 1.4 + Math.random() * .6, y: -1.2 };
+      else if (S.state === 'listening' || S.state === 'speaking') S.lookTarget = { x: (Math.random() - .5) * .8, y: 0 };
+      else S.lookTarget = { x: (Math.random() - .5) * 2.4, y: (Math.random() - .5) * 1.2 };
+      S.nextLook = S.state === 'idle' ? 1.5 + Math.random() * 3 : .8 + Math.random() * 1.5;
+    }
+    S.look.x += (S.lookTarget.x - S.look.x) * .18;
+    S.look.y += (S.lookTarget.y - S.look.y) * .18;
+    // sakkad: canlı bir göz hiç tam sabit durmaz
+    S.nextSac -= dt;
+    if (S.nextSac <= 0) {
+      const k = S.state === 'idle' ? .1 : .22;
+      S.sac = { x: (Math.random() - .5) * k, y: (Math.random() - .5) * k * .6 };
+      S.nextSac = .15 + Math.random() * .5;
+    }
+  }
+
+  // ------------------------------------------------------------------ 3B kafa modeli (nokta bulutu → piksel ızgarası)
+  // Kafa: elipsoit + yüz hatları (burun, göz çukurları, kaşlar, elmacık, dudaklar, çene) yer değiştirme haritası.
+  // Her karede döndürülür, perspektifle ızgaraya düşürülür, z-buffer ile en öndeki nokta kalır, ışıkla gölgelenir.
+  const gauss = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) / sx) ** 2 + ((y - cy) / sy) ** 2));
+  const EYES = [[-.3, -.06], [.3, -.06]];
+  const MOUTH_Y = .535;
+
+  function disp(fx, fy) {                       // yüzey kabartma haritası (ön yüz koordinatlarında)
+    let d = 0;
+    d += .17 * gauss(fx, fy, 0, .19, .062, .17) * Math.max(0, Math.min(1, (fy + .12) / .42));  // burun sırtı
+    d += .07 * gauss(fx, fy, 0, .33, .08, .06);                                                // burun ucu
+    d += .035 * (gauss(fx, fy, -.085, .36, .045, .035) + gauss(fx, fy, .085, .36, .045, .035)); // burun kanatları
+    for (const [ex, ey] of EYES) {
+      d -= .085 * gauss(fx, fy, ex, ey, .15, .095);          // göz çukuru
+      d += .05 * gauss(fx, fy, ex, ey, .085, .05);           // göz küresi
+      d += .05 * gauss(fx, fy, ex, ey - .17, .17, .04);      // kaş kemeri
+      d += .04 * gauss(fx, fy, ex * 1.35, ey + .28, .13, .1); // elmacık kemiği
+    }
+    d += .045 * gauss(fx, fy, 0, MOUTH_Y - .04, .16, .03);   // üst dudak
+    d += .055 * gauss(fx, fy, 0, MOUTH_Y + .05, .14, .035);  // alt dudak
+    d -= .02 * gauss(fx, fy, 0, MOUTH_Y + .14, .12, .03);    // dudak altı çukuru
+    d += .05 * gauss(fx, fy, 0, .86, .14, .07);              // çene ucu
+    return d;
+  }
+
+  const N = (() => {                            // noktaları bir kez üret
+    const NT = 240, NP = 240, P = [];
+    for (let i = 0; i < NT; i++) {
+      const th = -Math.PI / 2 * .97 + Math.PI * .97 * i / (NT - 1);
+      for (let j = 0; j < NP; j++) {
+        const ph = -1.9 + 3.8 * j / (NP - 1);
+        const a = .74, b = 1, c = .82;
+        let x = a * Math.cos(th) * Math.sin(ph), y = b * Math.sin(th), z = c * Math.cos(th) * Math.cos(ph);
+        if (y > .25) { const q = ((y - .25) / .75) ** 2; x *= 1 - .4 * q; z *= 1 - .12 * q; }   // çene daralması
+        if (y < 0) y *= .93;                                                                    // alın biraz daha basık
+        let nx = x / (a * a), ny = y / (b * b), nz = z / (c * c);
+        const bl = Math.hypot(nx, ny, nz), bnx = nx / bl, bny = ny / bl, bnz = nz / bl;           // kaba normal (görünürlük için)
+        let d = 0, tag = 0;
+        if (z > 0) {
+          d = disp(x, y) * Math.min(1, z / .35);
+          const e = .01, gx = (disp(x + e, y) - disp(x - e, y)) / (2 * e), gy = (disp(x, y + e) - disp(x, y - e)) / (2 * e);
+          const nl0 = Math.hypot(nx, ny, nz); nx = nx / nl0 - gx * .8; ny = ny / nl0 - gy * .8; nz = nz / nl0;
+          for (const [ex, ey] of EYES) {
+            if (((x - ex) / .135) ** 2 + ((y - ey) / .11) ** 2 < 1) tag = 1;                        // göz bölgesi
+            if (Math.abs(x - ex) < .17 && y > ey - .295 && y < ey - .1) tag = tag || 3;              // kaşın oynadığı bölge
+          }
+          if (Math.abs(x) < .2 && Math.abs(y - MOUTH_Y) < .085) tag = tag || 2;                     // dudaklar
+        }
+        const nl = Math.hypot(nx, ny, nz);
+        P.push([x + bnx * d, y + bny * d, z + bnz * d, nx / nl, ny / nl, nz / nl, x, y, tag, bnx, bny, bnz]);
+      }
+    }
+    return P;
+  })();
+
+  const zbuf = new Float32Array(G * G), vbuf = new Float32Array(G * G), wbuf = new Float32Array(G * G);
+  const L = (() => { const v = [-.35, -.5, .8], l = Math.hypot(...v); return v.map(c => c / l); })();
+
+  function renderHead(P) {
+    zbuf.fill(-1e9); vbuf.fill(0); wbuf.fill(0);
+    const t = S.t;
+    const yaw = .22 * Math.sin(t * .35) + S.look.x * .1 + .02 * Math.sin(t * 1.1),
+          pitch = .05 * Math.sin(t * .27) - S.look.y * .05 + E.nod
+            + (S.state === 'speaking' ? S.amp * .025 - S.emph * .035 : 0)
+            + (S.state === 'listening' ? .012 * Math.sin(t * 1.9) : 0),
+          roll = .025 * Math.sin(t * .21) + E.tilt;
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch),
+          cr = Math.cos(roll), sr = Math.sin(roll);
+    const D = 3.6, scale = G * .35 * (1 + .006 * Math.sin(t * 1.3)), half = G / 2;   // hafif nefes
+    const lookX = S.look.x + S.sac.x, lookY = S.look.y + S.sac.y;
+
+    // ağız: genişlik ve açıklık sesten gelir
+    const amp = Math.min(1, S.amp + E.open * (1 - S.amp * .5));
+    const w = .14 + S.width * .05 - amp * .015 + Math.max(0, E.smile) * .022, open = amp * .15 * (1 - S.width * .35);
+    const smile = .008 + E.smile * .034;       // dudak köşeleri: + yukarı (gülümseme), - aşağı (üzgün)
+
+    for (let i = 0; i < N.length; i++) {
+      const p = N[i];
+      let x = p[0], y = p[1], z = p[2];
+      const fx = p[6], fy = p[7], tag = p[8];
+      if (p[2] > 0 && Math.abs(fx) < .5 && fy > MOUTH_Y - .09) {   // çene ve dudak hareketi
+        const kx = Math.max(0, 1 - (fx / w) ** 2);
+        if (fy >= MOUTH_Y) {
+          const jaw = Math.min(1, (fy - MOUTH_Y) / .15) * Math.exp(-((fx / .35) ** 2));
+          y += open * (.65 * kx + .35 * jaw);
+        } else {
+          y -= open * .22 * kx;
+        }
+      }
+      if (p[2] > 0 && Math.abs(fx) < .34 && Math.abs(fy - MOUTH_Y) < .17) {   // gülümseme: köşeler ve çevresi kayar
+        const c = Math.min(1.7, (fx / .17) ** 2);
+        y -= smile * c * Math.exp(-(((fy - MOUTH_Y) / .075) ** 2)) * Math.max(0, 1 - (Math.abs(fx) / .34) ** 4);
+      }
+      // dönüş: yaw (y ekseni) → pitch (x ekseni) → roll (z ekseni)
+      let x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      let y1 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+      let x2 = x1 * cr - y1 * sr, y2 = x1 * sr + y1 * cr;
+      const n0 = p[3], n1 = p[4], n2 = p[5];
+      let m0 = n0 * cy + n2 * sy, m2 = -n0 * sy + n2 * cy;
+      let m1 = n1 * cp - m2 * sp; m2 = n1 * sp + m2 * cp;
+      const bz = p[10] * sp + (-p[9] * sy + p[11] * cy) * cp;    // kaba normalin ekrana bakan bileşeni
+      if (bz < -.2) continue;                                     // arka yüz
+      const s = D / (D - z2);
+      const gx = Math.round(half + x2 * scale * s), gy = Math.round(half + y2 * scale * s - G * .02);
+      if (gx < 0 || gy < 0 || gx >= G || gy >= G) continue;
+      const k = gy * G + gx;
+      if (z2 <= zbuf[k]) continue;
+      zbuf[k] = z2;
+
+      // ışık: yumuşak lambert + kenar parlaması + yüzeyi saran yatay hatlar (3B hissi)
+      const nd = Math.max(0, m0 * L[0] + m1 * L[1] + m2 * L[2]);
+      const rim = (1 - Math.abs(m2)) ** 3;
+      let v = .04 + .58 * nd ** 1.6 + .4 * rim, wh = 0;
+      const band = (fy * 22 + 100) % 1;
+      if (band < .14) v += .2 * (.3 + nd);
+
+      if (tag === 1) {                                            // göz: kapak, akı, parlayan iris
+        const left = fx < 0, [ex, ey] = left ? EYES[0] : EYES[1];
+        const rx = (fx - ex) / .13, arc = Math.sqrt(Math.max(0, 1 - rx * rx));
+        const bl = S.blink * Math.max(0, Math.min(1, (S.reveal - .8) * 5)) * (left ? 1 : 1 - E.wink);  // gözler en son açılır
+        const up = .074 * bl * E.eye * arc;                                        // üst kapak
+        const lo = .07 * bl * Math.min(1.12, E.eye) * (1 - E.cheek * .6) * arc;   // alt kapak (gülerken yükselir)
+        const dy = fy - ey, lid = dy < 0 ? up : lo;
+        if (Math.abs(dy) > lid) { v = .22 + .3 * nd; if (Math.abs(Math.abs(dy) - lid) < .012) v = .85; }
+        else {
+          const ix = ex + lookX * .04, iy = ey + lookY * .024;
+          const di = Math.hypot(fx - ix, (fy - iy) * 1.05) / E.pupil;
+          if (di < .026) { v = 1; wh = 1; }
+          else if (di < .05) { v = .9; wh = .35; }
+          else v = .3;
+        }
+      } else if (tag === 3) {                                     // kaş: ifadeye göre kalkar, eğilir
+        const left = fx < 0, [ex, ey] = left ? EYES[0] : EYES[1];
+        const dx = fx - ex, u = (left ? dx : -dx) / .16;          // +1 = buruna yakın iç uç
+        const raise = (left ? E.browL : E.browR) + S.emph * .4;
+        const yb = ey - .185 + .9 * dx * dx - raise * .04 - E.browTilt * .035 * u;
+        if (Math.abs(dx) < .16 && Math.abs(fy - yb) < .015) v = Math.max(v, .85);
+      }
+      else if (tag === 2 && Math.abs(fx) < w + .02) {             // dudak kenarları parlak
+        const kx = Math.max(0, 1 - (fx / (w + .02)) ** 2);
+        const upEdge = MOUTH_Y - .012 * kx, loEdge = MOUTH_Y + .012 * kx;
+        if (Math.abs(fy - upEdge) < .013 || Math.abs(fy - loEdge) < .013) { v = .95; wh = .3; }
+        else v += .12;
+      }
+      vbuf[k] = Math.min(1, v); wbuf[k] = wh;
+    }
+
+    // seyrek kalan pikselleri komşularından doldur (dik yüzeylerde örnek azalır)
+    for (let pass = 0; pass < 2; pass++) for (let j = 1; j < G - 1; j++) for (let i = 1; i < G - 1; i++) {
+      const k = j * G + i; if (zbuf[k] > -1e8) continue;
+      const pairs = [[k - 1, k + 1], [k - G, k + G], [k - G - 1, k + G + 1], [k - G + 1, k + G - 1]];
+      for (const [p1, p2] of pairs) if (zbuf[p1] > -1e8 && zbuf[p2] > -1e8) {
+        zbuf[k] = (zbuf[p1] + zbuf[p2]) / 2; vbuf[k] = (vbuf[p1] + vbuf[p2]) / 2; wbuf[k] = 0; break;
+      }
+    }
+
+    // ekran uzayı efektleri: dinlerken yayılan halkalar, düşünürken dönen yaylar, konuşurken ses halesi
+    if (S.state !== 'idle') {
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+        const k = j * G + i; if (zbuf[k] > -1e8) continue;
+        const dx = (i - half) / (G * .28), dyy = (j - half + G * .02) / (G * .37), d = Math.hypot(dx, dyy);
+        if (S.state === 'listening') {
+          for (let n = 0; n < 2; n++) {
+            const ph = (t * .7 + n * .5) % 1, r = 1.02 + .2 * ph;
+            if (Math.abs(d - r) < .016) vbuf[k] = Math.max(vbuf[k], .45 * (1 - ph));
+          }
+        } else if (S.state === 'thinking') {
+          const ang = Math.atan2(dyy, dx), seg = ((ang + t * 2.2) % (Math.PI / 3) + Math.PI / 3) % (Math.PI / 3);
+          if (Math.abs(d - 1.08) < .02 && seg < .45) vbuf[k] = .6;
+          const seg2 = ((ang - t * 1.3) % (Math.PI / 2) + Math.PI / 2) % (Math.PI / 2);
+          if (Math.abs(d - 1.2) < .014 && seg2 < .3) vbuf[k] = .3;
+        } else if (d > 1.05 && d < 1.3) {                         // konuşma: frekanslara göre uzayan ışınlar
+          const slot = Math.floor(Math.abs(Math.atan2(dx, -dyy)) / Math.PI * 44);
+          if (slot % 2) continue;                                 // ışınlar arasında boşluk
+          const lv = S.spec[Math.min(23, slot >> 1)], len = .015 + .15 * lv;
+          if (d - 1.07 > 0 && d - 1.07 < len) vbuf[k] = Math.max(vbuf[k], (.1 + .32 * lv) * (1 - (d - 1.07) / len * .7));
+        }
+      }
+    }
+    // çevrede süzülen parçacıklar (yüzün arkasında kalır)
+    for (const q of DUST) {
+      q.y -= q.v * (1 + S.amp * 2.5) * .016; q.x += Math.sin(t * q.w + q.p) * .02;
+      if (q.y < 0) { q.y = G - 1; q.x = Math.random() * G; }
+      const k = Math.floor(q.y) * G + Math.max(0, Math.min(G - 1, Math.floor(q.x)));
+      if (zbuf[k] < -1e8) vbuf[k] = Math.max(vbuf[k], q.b * (.55 + .45 * Math.sin(t * 2 * q.w + q.p)));
+    }
+  }
+  const DUST = Array.from({ length: 46 }, () => ({ x: Math.random() * G, y: Math.random() * G,
+    v: 1 + Math.random() * 3.5, w: .4 + Math.random() * 1.4, p: Math.random() * 6.28, b: .1 + Math.random() * .22 }));
+
+  // ------------------------------------------------------------------ çizim
+  let W = 0, H = 0, gaps = null;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = canvas.width = innerWidth * dpr; H = canvas.height = innerHeight * dpr;
+    gaps = null;
+  }
+  addEventListener('resize', resize); resize();
+
+  function gapLayer(size, cell) {        // pikseller arasındaki siyah boşluklar = LED görünümü
+    const g = document.createElement('canvas'); g.width = g.height = Math.ceil(size);
+    const c = g.getContext('2d'); c.fillStyle = '#020409';
+    const gw = Math.max(1, cell * .26);
+    for (let i = 0; i <= G; i++) { c.fillRect(i * cell - gw / 2, 0, gw, size); c.fillRect(0, i * cell - gw / 2, size, gw); }
+    return g;
+  }
+
+  // Her pikselin sabit bir çıkış noktası (ekranın bir kenarının dışı), gecikmesi ve kavis yönü vardır.
+  // Yüz bu sırada da canlıdır: her karede o anki görüntünün pikselleri yoldaki yerlerine çizilir.
+  const ASM = (() => {
+    const n = G * G, sx = new Float32Array(n), sy = new Float32Array(n), delay = new Float32Array(n),
+          curl = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      const side = Math.floor(Math.random() * 4), far = .03 + Math.random() * .3, along = Math.random();
+      sx[k] = side === 0 ? -far : side === 1 ? 1 + far : along;       // sol, sağ, üst, alt
+      sy[k] = side === 2 ? -far : side === 3 ? 1 + far : along;
+      delay[k] = Math.random() * .42; curl[k] = (Math.random() - .5) * 14;
+    }
+    return { sx, sy, delay, curl };
+  })();
+
+  function drawAssembly(data, cell, ox, oy) {
+    const r = S.reveal, sp = Math.max(1, cell * .74);
+    for (let k = 0; k < G * G; k++) {
+      const al = data[k * 4 + 3]; if (al < 10) continue;
+      let p = (r - ASM.delay[k]) / .58; if (p <= 0) continue;
+      p = p >= 1 ? 1 : 1 - (1 - p) ** 3;                              // hızlı gelir, yerine yumuşak oturur
+      const tx = ox + (k % G) * cell, ty = oy + ((k / G) | 0) * cell;
+      const x0 = ASM.sx[k] * W, y0 = ASM.sy[k] * H, bend = Math.sin(p * Math.PI) * ASM.curl[k] * cell;
+      const dx = tx - x0, dy = ty - y0, len = Math.hypot(dx, dy) || 1;
+      let x = x0 + dx * p - dy / len * bend, y = y0 + dy * p + dx / len * bend;
+      x = ox + Math.round((x - ox) / cell) * cell; y = oy + Math.round((y - oy) / cell) * cell;   // ızgaraya oturt
+      const hot = (1 - p) * .7;                                       // yoldayken daha beyaz ve parlak
+      ctx.fillStyle = `rgba(${data[k * 4] + (255 - data[k * 4]) * hot | 0},${data[k * 4 + 1] + (255 - data[k * 4 + 1]) * hot | 0},`
+        + `${data[k * 4 + 2] + (255 - data[k * 4 + 2]) * hot | 0},${Math.min(1, al / 255 + hot * .5)})`;
+      ctx.fillRect(x + (cell - sp) / 2, y + (cell - sp) / 2, sp, sp);
+    }
+    ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = .45;   // parıltı
+    ctx.filter = `blur(${Math.round(cell * 2.5)}px)`;
+    ctx.drawImage(canvas, 0, 0);
+    ctx.filter = 'none'; ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now; S.t += dt;
+    updateExpression(dt); updateEyes(dt); updateMouth(dt);
+    S.power += (S.powerTarget - S.power) * .06;
+    const breath = S.state === 'idle' ? .08 * Math.sin(S.t * 1.3) : 0;
+    const P = Math.max(S.power + breath, S.reveal < 1 ? .85 : 0);   // toplanırken pikseller sönük kalmasın
+
+    renderHead(N);
+    const data = img.data;
+    for (let k = 0; k < G * G; k++) {
+      const v = Math.min(1, vbuf[k] * P), wmix = Math.max(wbuf[k], Math.max(0, v - .75) / .25);
+      data[k * 4]     = E.r + (WHITE[0] - E.r) * wmix;
+      data[k * 4 + 1] = E.g + (WHITE[1] - E.g) * wmix;
+      data[k * 4 + 2] = E.b + (WHITE[2] - E.b) * wmix;
+      data[k * 4 + 3] = v * 255;
+    }
+    octx.putImageData(img, 0, 0);
+
+    ctx.fillStyle = '#020409'; ctx.fillRect(0, 0, W, H);
+    const size = Math.min(W, H) * .9, cell = size / G, ox = (W - size) / 2, oy = (H - size) / 2 - H * .02;
+    if (!gaps) gaps = gapLayer(size, cell);
+    if (S.reveal < 1) { drawAssembly(data, cell, ox, oy); requestAnimationFrame(frame); return; }
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; ctx.filter = 'none';
+    ctx.drawImage(off, ox, oy, size, size);
+    ctx.drawImage(gaps, ox, oy);
+    // parıltı
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.imageSmoothingEnabled = true;
+    ctx.filter = `blur(${Math.round(cell * 2.5)}px)`; ctx.globalAlpha = .5;
+    ctx.drawImage(off, ox, oy, size, size);
+    ctx.filter = 'none'; ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ------------------------------------------------------------------ sunucu olayları
+  function handle(ev) {
+    if (ev.type === 'hello' && ev.name) document.getElementById('top').firstChild.textContent = ev.name.toUpperCase();
+    if (ev.type === 'state') setState(ev.state);
+    if (ev.type === 'heard') { $heard.textContent = ev.text ? `“${ev.text}”` : ''; }
+    if (ev.type === 'speak') {
+      S.more = !!ev.more; S.emotion = EMO[ev.emotion] ? ev.emotion : 'neutral';
+      speak(ev.audio, ev.text || '');
+    }
+    if (ev.type === 'close') { S.closing = true; document.body.classList.add('closing'); }
+    if (ev.type === 'stop') {                 // kullanıcı "dur" dedi: hemen sus
+      audio.pause(); audio.removeAttribute('src'); S.fake = null; S.more = false;
+      clearInterval(typeTimer); $sub.textContent = ''; S.emoUntil = 0; setState('listening');
+    }
+  }
+
+  if (DEMO) {                                   // ?demo : sunucusuz önizleme
+    const lines = [['neutral', 'Buyurun efendim, sizi dinliyorum.'],
+      ['happy', 'Televizyonu açtım, keyfine bak.'],
+      ['curious', 'Projeye on iki gündür dokunulmadı, hatırlatmamı ister misin?'],
+      ['sad', 'Maalesef YouTube\'a ulaşamadım, birazdan tekrar deneyeceğim.'],
+      ['surprised', 'Vay, kanal bir gecede bin abone kazanmış!'],
+      ['excited', 'Harika, video yayında!'],
+      ['wink', 'Şaka yapıyorum efendim.']];
+    let n = 0;
+    const loop = () => {
+      setState('listening'); $sub.textContent = ''; $heard.textContent = '“Nova, projelerim ne durumda?”';
+      setTimeout(() => setState('thinking'), 1800);
+      setTimeout(() => { const [emo, text] = lines[n++ % lines.length]; S.emotion = emo; speak(null, text); }, 3400);
+    };
+    addEventListener('keydown', (e) => {          // 1-7: ifadeyi elle dene
+      const hit = lines[+e.key - 1];
+      if (hit) { S.emotion = hit[0]; speak(null, hit[1]); }
+    });
+    window.__demoEnded = () => setTimeout(loop, 2500);
+    setTimeout(loop, 600);
+  } else {
+    const es = new EventSource(`/face/events?t=${TOKEN}`);
+    es.onmessage = (m) => handle(JSON.parse(m.data));
+  }
+  window.__nova = { S, E, EMO, setState, speak };
+})();
+</script>
+</body>
+</html>

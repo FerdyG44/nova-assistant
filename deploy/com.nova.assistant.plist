@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mac açıldığında Nova'yı başlatır, çökerse yeniden açar.
+     Kurulum (NOVA_DIR yerine reponun tam yolunu yazar):
+       sed "s|NOVA_DIR|$PWD|g" deploy/com.nova.assistant.plist > ~/Library/LaunchAgents/com.nova.assistant.plist
+       launchctl load ~/Library/LaunchAgents/com.nova.assistant.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nova.assistant</string>
+  <key>WorkingDirectory</key><string>NOVA_DIR/server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>NOVA_DIR/server/.venv/bin/python</string>
+    <string>-m</string><string>nova.main</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

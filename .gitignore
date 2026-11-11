@@ -1,0 +1,13 @@
+.env
+data/
+server/.venv/
+__pycache__/
+.pytest_cache/
+app/build/
+app/.dart_tool/
+.DS_Store
+*.bak
+# Kendi proje notların sende kalır; yalnızca örnek dosya repoda durur
+knowledge/*
+!knowledge/README.md
+!knowledge/ornek-proje.md
