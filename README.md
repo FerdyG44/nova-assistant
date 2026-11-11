@@ -45,7 +45,7 @@ Ollama** (free, runs offline, weaker). If Claude is unreachable, Nova falls back
 ## Setup
 
 ```bash
-git clone <this repo> nova && cd nova
+git clone https://github.com/FerdyG44/nova-assistant.git nova && cd nova
 cp .env.example .env
 sed -i '' "s/buraya-uzun-rastgele-bir-token/$(openssl rand -hex 24)/" .env
 open -e .env          # set NOVA_OWNER, NOVA_HOME_CITY and (optionally) ANTHROPIC_API_KEY

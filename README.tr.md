@@ -43,7 +43,7 @@ Beyin olarak **Claude API** (önerilen: araç kullanımında çok daha güvenili
 ## Kurulum
 
 ```bash
-git clone <bu repo> nova && cd nova
+git clone https://github.com/FerdyG44/nova-assistant.git nova && cd nova
 cp .env.example .env
 sed -i '' "s/buraya-uzun-rastgele-bir-token/$(openssl rand -hex 24)/" .env
 open -e .env          # NOVA_OWNER, NOVA_HOME_CITY ve (istersen) ANTHROPIC_API_KEY değerlerini yaz
